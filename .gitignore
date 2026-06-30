@@ -1,0 +1,15 @@
+# Downloaded SteamCMD and Garry's Mod dedicated server files.
+# Recreate them with update-gmod-server.bat instead of storing GBs of binaries in Git.
+/server/*
+!/server/garrysmod/
+/server/garrysmod/*
+!/server/garrysmod/cfg/
+/server/garrysmod/cfg/*
+!/server/garrysmod/cfg/server.cfg
+/steamcmd/
+
+# Runtime output
+*.log
+*.tmp
+cache/
+downloads/
