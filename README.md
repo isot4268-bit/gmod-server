@@ -27,6 +27,7 @@ Before exposing the server publicly, change `rcon_password` in `server/garrysmod
 This backend is for running multiple GMod shards/VDS servers together:
 
 - player presence and last known state
+- near real-time movement snapshots for remote ghost players
 - Redis cache and pub/sub
 - Postgres persistence
 - cross-server event log
@@ -61,3 +62,15 @@ sync_server_id "vds-13"
 ```
 
 Use `sync_server_id "vds-44"` on the other VDS.
+
+Movement sync defaults to 10 updates per second:
+
+```cfg
+sync_state_rate "0.10"
+sync_ghost_rate "0.10"
+```
+
+Remote players are rendered as translucent clientside models. This is a shard
+visibility layer, not true Source-engine entity replication: bullets, physics,
+collisions, prediction, voice, and vehicle control still belong to the server
+the real player is connected to.

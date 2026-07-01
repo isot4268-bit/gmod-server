@@ -50,6 +50,17 @@ const stateSchema = playerSchema.extend({
   state: z.record(z.unknown()).default({}),
 });
 
+const stateBatchSchema = z.object({
+  serverId: z.string().min(1).max(64),
+  players: z.array(
+    z.object({
+      steamId: z.string().min(3).max(64),
+      name: z.string().min(1).max(128).optional(),
+      state: z.record(z.unknown()).default({}),
+    }),
+  ).max(128),
+});
+
 const eventSchema = z.object({
   serverId: z.string().min(1).max(64),
   type: z.string().min(1).max(64),
@@ -242,6 +253,84 @@ app.post("/players/state", async (request) => {
   await redis.set(`state:${body.steamId}`, JSON.stringify(body));
   await publish("player.state", body);
   return { ok: true };
+});
+
+app.post("/players/states", async (request) => {
+  const body = stateBatchSchema.parse(request.body);
+  const client = await pool.connect();
+
+  try {
+    await client.query("begin");
+
+    for (const player of body.players) {
+      await client.query(
+        `insert into player_profiles (steam_id, name, first_seen, last_seen)
+         values ($1, $2, now(), now())
+         on conflict (steam_id) do update set
+           name = coalesce(excluded.name, player_profiles.name),
+           last_seen = now()`,
+        [player.steamId, player.name ?? null],
+      );
+      await client.query(
+        `insert into player_presence (steam_id, server_id, connected, updated_at)
+         values ($1, $2, true, now())
+         on conflict (steam_id) do update set
+           server_id = excluded.server_id,
+           connected = true,
+           updated_at = now()`,
+        [player.steamId, body.serverId],
+      );
+      await client.query(
+        `insert into player_state (steam_id, server_id, state, updated_at)
+         values ($1, $2, $3, now())
+         on conflict (steam_id) do update set
+           server_id = excluded.server_id,
+           state = excluded.state,
+           updated_at = now()`,
+        [player.steamId, body.serverId, player.state],
+      );
+    }
+
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (body.players.length > 0) {
+    await redis.setex(`states:${body.serverId}`, 2, JSON.stringify(body));
+    await publish("players.states", body);
+  }
+
+  return { ok: true, count: body.players.length };
+});
+
+app.get("/players/states", async (request) => {
+  const serverId = request.query.serverId;
+  const seconds = Math.min(Math.max(Number(request.query.seconds ?? 2), 1), 10);
+  const args = [seconds];
+  let where = "pr.connected = true and ps.updated_at > now() - ($1 * interval '1 second')";
+
+  if (serverId) {
+    args.push(serverId);
+    where += " and ps.server_id <> $2";
+  }
+
+  const result = await pool.query(
+    `select p.steam_id as "steamId", p.name, ps.server_id as "serverId",
+            ps.state, ps.updated_at as "updatedAt"
+     from player_state ps
+     join player_profiles p on p.steam_id = ps.steam_id
+     left join player_presence pr on pr.steam_id = ps.steam_id
+     where ${where}
+     order by ps.updated_at desc
+     limit 256`,
+    args,
+  );
+
+  return { players: result.rows };
 });
 
 app.get("/players", async () => {

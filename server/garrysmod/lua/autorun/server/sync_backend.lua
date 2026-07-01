@@ -1,8 +1,14 @@
 if CLIENT then return end
 
+AddCSLuaFile("autorun/client/sync_backend_ghosts.lua")
+
 CreateConVar("sync_backend_url", "http://127.0.0.1:8080", FCVAR_ARCHIVE, "Sync backend base URL")
 CreateConVar("sync_backend_key", "change-this-long-random-key", FCVAR_ARCHIVE, "Sync backend API key")
 CreateConVar("sync_server_id", "vds-13", FCVAR_ARCHIVE, "Unique shard/server id")
+CreateConVar("sync_state_rate", "0.10", FCVAR_ARCHIVE, "Seconds between movement sync updates")
+CreateConVar("sync_ghost_rate", "0.10", FCVAR_ARCHIVE, "Seconds between remote ghost polls")
+
+util.AddNetworkString("SyncBackendGhostStates")
 
 local lastEventId = 0
 
@@ -41,13 +47,18 @@ end
 local function playerState(ply)
     local pos = ply:GetPos()
     local ang = ply:EyeAngles()
+    local vel = ply:GetVelocity()
     local payload = playerPayload(ply)
     payload.state = {
         health = ply:Health(),
         armor = ply:Armor(),
         team = team.GetName(ply:Team()),
+        model = ply:GetModel(),
         position = { x = pos.x, y = pos.y, z = pos.z },
         angle = { pitch = ang.p, yaw = ang.y, roll = ang.r },
+        velocity = { x = vel.x, y = vel.y, z = vel.z },
+        crouching = ply:Crouching(),
+        onGround = ply:OnGround(),
         alive = ply:Alive()
     }
     return payload
@@ -85,10 +96,50 @@ timer.Create("SyncBackendHeartbeat", 10, 0, function()
     })
 end)
 
-timer.Create("SyncBackendPlayerState", 5, 0, function()
+timer.Create("SyncBackendPlayerState", 0.10, 0, function()
+    local interval = math.Clamp(GetConVar("sync_state_rate"):GetFloat(), 0.05, 1)
+    timer.Adjust("SyncBackendPlayerState", interval, 0)
+
+    local players = {}
     for _, ply in ipairs(player.GetHumans()) do
-        postJson("/players/state", playerState(ply))
+        local payload = playerState(ply)
+        table.insert(players, {
+            steamId = payload.steamId,
+            name = payload.name,
+            state = payload.state
+        })
     end
+
+    postJson("/players/states", {
+        serverId = GetConVar("sync_server_id"):GetString(),
+        players = players
+    })
+end)
+
+timer.Create("SyncBackendGhostPoll", 0.10, 0, function()
+    local interval = math.Clamp(GetConVar("sync_ghost_rate"):GetFloat(), 0.05, 1)
+    timer.Adjust("SyncBackendGhostPoll", interval, 0)
+
+    local url = backendUrl("/players/states?seconds=2&serverId=" .. GetConVar("sync_server_id"):GetString())
+    HTTP({
+        method = "GET",
+        url = url,
+        headers = headers(),
+        success = function(_, body)
+            local decoded = util.JSONToTable(body or "")
+            if not decoded or not decoded.players then return end
+
+            local encoded = util.TableToJSON(decoded.players)
+            if not encoded or #encoded > 60000 then return end
+
+            net.Start("SyncBackendGhostStates")
+            net.WriteString(encoded)
+            net.Broadcast()
+        end,
+        failed = function(err)
+            print("[sync-backend] ghost poll failed: " .. tostring(err))
+        end
+    })
 end)
 
 timer.Create("SyncBackendEventPoll", 3, 0, function()
