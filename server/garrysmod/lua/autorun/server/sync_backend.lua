@@ -18,9 +18,18 @@ util.AddNetworkString("SyncBackendGhostStates")
 local lastEventId = 0
 local testPeds = {}
 
-timer.Simple(0, function()
-    game.ConsoleCommand("exec sync_backend.cfg\n")
-end)
+local function loadSyncConfig()
+    RunConsoleCommand("exec", "sync_backend.cfg")
+
+    timer.Simple(0.5, function()
+        print("[sync-backend] config loaded: serverId=" .. GetConVar("sync_server_id"):GetString()
+            .. " testPeds=" .. tostring(GetConVar("sync_test_peds"):GetBool())
+            .. " backend=" .. GetConVar("sync_backend_url"):GetString())
+    end)
+end
+
+timer.Simple(1, loadSyncConfig)
+timer.Simple(5, loadSyncConfig)
 
 local function backendUrl(path)
     return GetConVar("sync_backend_url"):GetString() .. path
