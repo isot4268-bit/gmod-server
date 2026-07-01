@@ -51,6 +51,15 @@ Health check:
 curl http://127.0.0.1:8080/health
 ```
 
+Without Docker/Redis/Postgres, use temporary memory mode for live testing:
+
+```bat
+set SYNC_API_KEY=change-this-long-random-key
+start-sync-backend-memory.bat
+```
+
+Memory mode is not persistent; it is for testing sync before Redis/Postgres are installed.
+
 ### Configure Each GMod Server
 
 Copy this repo to each VDS, then set unique server IDs in the server console or config:

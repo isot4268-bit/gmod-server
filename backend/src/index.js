@@ -13,6 +13,7 @@ const env = {
     process.env.DATABASE_URL ??
     "postgres://gmod:gmod@127.0.0.1:5432/gmod_sync",
   logLevel: process.env.LOG_LEVEL ?? "info",
+  memoryMode: process.env.SYNC_MEMORY === "1",
 };
 
 const app = Fastify({
@@ -25,11 +26,19 @@ const app = Fastify({
   },
 });
 
-const redis = new Redis(env.redisUrl);
-const pub = new Redis(env.redisUrl);
-const sub = new Redis(env.redisUrl);
-const pool = new pg.Pool({ connectionString: env.databaseUrl });
+const redis = env.memoryMode ? null : new Redis(env.redisUrl);
+const pub = env.memoryMode ? null : new Redis(env.redisUrl);
+const sub = env.memoryMode ? null : new Redis(env.redisUrl);
+const pool = env.memoryMode ? null : new pg.Pool({ connectionString: env.databaseUrl });
 const sockets = new Set();
+const memory = {
+  servers: new Map(),
+  profiles: new Map(),
+  presence: new Map(),
+  states: new Map(),
+  events: [],
+  nextEventId: 1,
+};
 
 const serverSchema = z.object({
   serverId: z.string().min(1).max(64),
@@ -81,6 +90,8 @@ app.addHook("preHandler", async (request, reply) => {
 });
 
 async function migrate() {
+  if (env.memoryMode) return;
+
   await pool.query(`
     create table if not exists servers (
       server_id text primary key,
@@ -126,10 +137,31 @@ async function migrate() {
 
 async function publish(type, payload) {
   const message = JSON.stringify({ type, payload, at: new Date().toISOString() });
+  if (env.memoryMode) {
+    for (const socket of sockets) {
+      if (socket.readyState === 1) socket.send(message);
+    }
+    return;
+  }
   await pub.publish("gmod.events", message);
 }
 
 async function logEvent({ serverId, type, steamId = null, payload = {} }) {
+  if (env.memoryMode) {
+    const event = {
+      id: memory.nextEventId++,
+      serverId,
+      type,
+      steamId,
+      payload,
+      createdAt: new Date().toISOString(),
+    };
+    memory.events.push(event);
+    if (memory.events.length > 2000) memory.events.shift();
+    await publish("event", event);
+    return event;
+  }
+
   const result = await pool.query(
     `insert into event_log (server_id, type, steam_id, payload)
      values ($1, $2, $3, $4)
@@ -150,9 +182,11 @@ async function logEvent({ serverId, type, steamId = null, payload = {} }) {
 }
 
 app.get("/health", async () => {
-  await pool.query("select 1");
-  await redis.ping();
-  return { ok: true };
+  if (!env.memoryMode) {
+    await pool.query("select 1");
+    await redis.ping();
+  }
+  return { ok: true, memoryMode: env.memoryMode };
 });
 
 app.post("/servers/:serverId/heartbeat", async (request) => {
@@ -160,6 +194,17 @@ app.post("/servers/:serverId/heartbeat", async (request) => {
     ...request.body,
     serverId: request.params.serverId,
   });
+
+  if (env.memoryMode) {
+    memory.servers.set(body.serverId, {
+      ...body,
+      name: body.name ?? body.serverId,
+      players: body.players ?? 0,
+      maxPlayers: body.maxPlayers ?? 128,
+      lastSeen: new Date().toISOString(),
+    });
+    return { ok: true };
+  }
 
   await pool.query(
     `insert into servers (server_id, name, map, gamemode, players, max_players, last_seen)
@@ -186,6 +231,10 @@ app.post("/servers/:serverId/heartbeat", async (request) => {
 });
 
 app.get("/servers", async () => {
+  if (env.memoryMode) {
+    return { servers: [...memory.servers.values()] };
+  }
+
   const result = await pool.query(
     `select server_id as "serverId", name, map, gamemode, players,
             max_players as "maxPlayers", last_seen as "lastSeen"
@@ -197,6 +246,22 @@ app.get("/servers", async () => {
 
 app.post("/players/connect", async (request) => {
   const body = playerSchema.parse(request.body);
+
+  if (env.memoryMode) {
+    memory.profiles.set(body.steamId, {
+      steamId: body.steamId,
+      name: body.name ?? null,
+      firstSeen: memory.profiles.get(body.steamId)?.firstSeen ?? new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+    });
+    memory.presence.set(body.steamId, {
+      steamId: body.steamId,
+      serverId: body.serverId,
+      connected: true,
+      updatedAt: new Date().toISOString(),
+    });
+    return logEvent({ serverId: body.serverId, type: "player.connect", steamId: body.steamId, payload: body });
+  }
 
   await pool.query(
     `insert into player_profiles (steam_id, name, first_seen, last_seen)
@@ -221,6 +286,18 @@ app.post("/players/connect", async (request) => {
 app.post("/players/disconnect", async (request) => {
   const body = playerSchema.parse(request.body);
 
+  if (env.memoryMode) {
+    const current = memory.presence.get(body.steamId) ?? {};
+    memory.presence.set(body.steamId, {
+      ...current,
+      steamId: body.steamId,
+      serverId: body.serverId,
+      connected: false,
+      updatedAt: new Date().toISOString(),
+    });
+    return logEvent({ serverId: body.serverId, type: "player.disconnect", steamId: body.steamId, payload: body });
+  }
+
   await pool.query(
     `update player_presence
      set connected = false, updated_at = now()
@@ -233,6 +310,24 @@ app.post("/players/disconnect", async (request) => {
 
 app.post("/players/state", async (request) => {
   const body = stateSchema.parse(request.body);
+
+  if (env.memoryMode) {
+    memory.profiles.set(body.steamId, {
+      steamId: body.steamId,
+      name: body.name ?? memory.profiles.get(body.steamId)?.name ?? null,
+      firstSeen: memory.profiles.get(body.steamId)?.firstSeen ?? new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+    });
+    memory.states.set(body.steamId, {
+      steamId: body.steamId,
+      name: body.name ?? null,
+      serverId: body.serverId,
+      state: body.state,
+      updatedAt: new Date().toISOString(),
+    });
+    await publish("player.state", body);
+    return { ok: true };
+  }
 
   await pool.query(
     `insert into player_profiles (steam_id, name, first_seen, last_seen)
@@ -257,6 +352,34 @@ app.post("/players/state", async (request) => {
 
 app.post("/players/states", async (request) => {
   const body = stateBatchSchema.parse(request.body);
+
+  if (env.memoryMode) {
+    const updatedAt = new Date().toISOString();
+    for (const player of body.players) {
+      memory.profiles.set(player.steamId, {
+        steamId: player.steamId,
+        name: player.name ?? memory.profiles.get(player.steamId)?.name ?? null,
+        firstSeen: memory.profiles.get(player.steamId)?.firstSeen ?? updatedAt,
+        lastSeen: updatedAt,
+      });
+      memory.presence.set(player.steamId, {
+        steamId: player.steamId,
+        serverId: body.serverId,
+        connected: true,
+        updatedAt,
+      });
+      memory.states.set(player.steamId, {
+        steamId: player.steamId,
+        name: player.name ?? null,
+        serverId: body.serverId,
+        state: player.state,
+        updatedAt,
+      });
+    }
+    if (body.players.length > 0) await publish("players.states", body);
+    return { ok: true, count: body.players.length };
+  }
+
   const client = await pool.connect();
 
   try {
@@ -310,6 +433,20 @@ app.post("/players/states", async (request) => {
 app.get("/players/states", async (request) => {
   const serverId = request.query.serverId;
   const seconds = Math.min(Math.max(Number(request.query.seconds ?? 2), 1), 10);
+
+  if (env.memoryMode) {
+    const cutoff = Date.now() - seconds * 1000;
+    const players = [...memory.states.values()].filter((player) => {
+      const presence = memory.presence.get(player.steamId);
+      return (
+        presence?.connected === true &&
+        new Date(player.updatedAt).getTime() > cutoff &&
+        (!serverId || player.serverId !== serverId)
+      );
+    });
+    return { players };
+  }
+
   const args = [seconds];
   let where = "pr.connected = true and ps.updated_at > now() - ($1 * interval '1 second')";
 
@@ -334,6 +471,19 @@ app.get("/players/states", async (request) => {
 });
 
 app.get("/players", async () => {
+  if (env.memoryMode) {
+    const players = [...memory.profiles.values()].map((profile) => ({
+      steamId: profile.steamId,
+      name: profile.name,
+      serverId: memory.presence.get(profile.steamId)?.serverId ?? null,
+      connected: memory.presence.get(profile.steamId)?.connected ?? false,
+      presenceUpdatedAt: memory.presence.get(profile.steamId)?.updatedAt ?? null,
+      state: memory.states.get(profile.steamId)?.state ?? null,
+      stateUpdatedAt: memory.states.get(profile.steamId)?.updatedAt ?? null,
+    }));
+    return { players };
+  }
+
   const result = await pool.query(
     `select p.steam_id as "steamId", p.name, pr.server_id as "serverId",
             pr.connected, pr.updated_at as "presenceUpdatedAt",
@@ -348,6 +498,18 @@ app.get("/players", async () => {
 });
 
 app.get("/players/:steamId", async (request, reply) => {
+  if (env.memoryMode) {
+    const profile = memory.profiles.get(request.params.steamId);
+    if (!profile) return reply.code(404).send({ error: "not found" });
+    return {
+      steamId: profile.steamId,
+      name: profile.name,
+      serverId: memory.presence.get(profile.steamId)?.serverId ?? null,
+      connected: memory.presence.get(profile.steamId)?.connected ?? false,
+      state: memory.states.get(profile.steamId)?.state ?? null,
+    };
+  }
+
   const result = await pool.query(
     `select p.steam_id as "steamId", p.name, pr.server_id as "serverId",
             pr.connected, ps.state
@@ -369,6 +531,14 @@ app.post("/events", async (request) => {
 app.get("/events", async (request) => {
   const since = Number(request.query.since ?? 0);
   const serverId = request.query.serverId;
+
+  if (env.memoryMode) {
+    const events = memory.events
+      .filter((event) => event.id > since && (!serverId || event.serverId !== serverId))
+      .slice(0, 200);
+    return { events };
+  }
+
   const args = [since];
   let where = "id > $1";
 
@@ -395,12 +565,14 @@ app.get("/ws", { websocket: true }, (socket) => {
   socket.on("close", () => sockets.delete(socket));
 });
 
-sub.subscribe("gmod.events");
-sub.on("message", (_channel, message) => {
-  for (const socket of sockets) {
-    if (socket.readyState === 1) socket.send(message);
-  }
-});
+if (!env.memoryMode) {
+  sub.subscribe("gmod.events");
+  sub.on("message", (_channel, message) => {
+    for (const socket of sockets) {
+      if (socket.readyState === 1) socket.send(message);
+    }
+  });
+}
 
 await migrate();
 await app.listen({ host: "0.0.0.0", port: env.port });
