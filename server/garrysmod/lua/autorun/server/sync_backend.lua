@@ -11,8 +11,10 @@ CreateConVar("sync_test_peds", "0", FCVAR_ARCHIVE, "Publish moving test peds for
 CreateConVar("sync_test_ped_count", "4", FCVAR_ARCHIVE, "Number of moving test peds to publish")
 CreateConVar("sync_test_ped_radius", "260", FCVAR_ARCHIVE, "Movement radius for test peds")
 CreateConVar("sync_test_ped_speed", "1.4", FCVAR_ARCHIVE, "Movement speed for test peds")
+CreateConVar("sync_test_ped_health", "100", FCVAR_ARCHIVE, "Health for generated test peds")
 CreateConVar("sync_test_ped_spawn_entities", "1", FCVAR_ARCHIVE, "Spawn real moving test ped entities on this server")
 CreateConVar("sync_spawn_remote_entities", "1", FCVAR_ARCHIVE, "Spawn server-side entities for remote synced players")
+CreateConVar("sync_remote_entity_damage", "1", FCVAR_ARCHIVE, "Forward damage dealt to remote synced entities through the sync backend")
 
 util.AddNetworkString("SyncBackendGhostStates")
 
@@ -79,6 +81,89 @@ local function postJson(path, data)
     })
 end
 
+local function entityId(serverId, index)
+    return "ped:" .. serverId .. ":" .. index
+end
+
+local function makeDamageablePed(entity, syncId, isRemote)
+    entity.SyncBackendId = syncId
+    entity.SyncBackendIsRemote = isRemote == true
+    entity.SyncBackendDead = false
+
+    local health = math.Clamp(GetConVar("sync_test_ped_health"):GetInt(), 1, 10000)
+    entity:SetMaxHealth(health)
+    entity:SetHealth(health)
+    entity:SetBloodColor(BLOOD_COLOR_RED)
+    entity:SetKeyValue("health", tostring(health))
+    entity:SetSaveValue("m_takedamage", 2)
+end
+
+local function damageAttackerPayload(attacker)
+    if not IsValid(attacker) then return nil end
+
+    local payload = {
+        class = attacker:GetClass(),
+        name = tostring(attacker)
+    }
+
+    if attacker:IsPlayer() then
+        payload.name = attacker:Nick()
+        payload.steamId = attacker:SteamID64() or attacker:SteamID()
+    end
+
+    return payload
+end
+
+local function damagePed(entity, damageInfo, forwarded)
+    if not IsValid(entity) or entity.SyncBackendDead then return true end
+
+    local amount = math.max(0, damageInfo:GetDamage())
+    if amount <= 0 then return true end
+
+    local nextHealth = math.max(0, entity:Health() - amount)
+    entity:SetHealth(nextHealth)
+
+    local hitPos = damageInfo:GetDamagePosition()
+    if hitPos and hitPos ~= vector_origin then
+        local effect = EffectData()
+        effect:SetOrigin(hitPos)
+        effect:SetEntity(entity)
+        util.Effect("BloodImpact", effect, true, true)
+    end
+
+    if nextHealth <= 0 then
+        entity.SyncBackendDead = true
+        entity:SetNoDraw(true)
+        entity:SetNotSolid(true)
+
+        timer.Simple(5, function()
+            if IsValid(entity) and not entity.SyncBackendIsRemote then
+                local health = math.Clamp(GetConVar("sync_test_ped_health"):GetInt(), 1, 10000)
+                entity.SyncBackendDead = false
+                entity:SetNoDraw(false)
+                entity:SetNotSolid(false)
+                entity:SetHealth(health)
+            end
+        end)
+    end
+
+    if entity.SyncBackendIsRemote and forwarded ~= true and GetConVar("sync_remote_entity_damage"):GetBool() then
+        postJson("/events", {
+            serverId = GetConVar("sync_server_id"):GetString(),
+            type = "entity_damage",
+            steamId = entity.SyncBackendId,
+            payload = {
+                targetSteamId = entity.SyncBackendId,
+                damage = amount,
+                damageType = damageInfo:GetDamageType(),
+                attacker = damageAttackerPayload(damageInfo:GetAttacker())
+            }
+        })
+    end
+
+    return true
+end
+
 local function playerPayload(ply)
     return {
         steamId = ply:SteamID64() or ply:SteamID(),
@@ -133,9 +218,10 @@ local function ensureTestPeds(count)
                 ped:SetModel("models/player/kleiner.mdl")
                 ped:SetSolid(SOLID_BBOX)
                 ped:SetMoveType(MOVETYPE_NONE)
-                ped:SetCollisionGroup(COLLISION_GROUP_PLAYER)
+                ped:SetCollisionGroup(COLLISION_GROUP_NPC)
                 ped:SetNWString("SyncBackendPedName", "Sync Ped " .. index)
                 ped:Spawn()
+                makeDamageablePed(ped, entityId(GetConVar("sync_server_id"):GetString(), index), false)
                 ped.AutomaticFrameAdvance = true
 
                 local sequence = ped:LookupSequence("walk_all")
@@ -240,6 +326,8 @@ local function appendTestPeds(players)
         local yaw = ang.y
         local model = "models/player/kleiner.mdl"
         local alive = true
+        local health = math.Clamp(GetConVar("sync_test_ped_health"):GetInt(), 1, 10000)
+        local maxHealth = health
 
         if GetConVar("sync_test_ped_spawn_entities"):GetBool() then
             pcall(function()
@@ -247,8 +335,15 @@ local function appendTestPeds(players)
 
                 if IsValid(testPeds[index]) then
                     local ped = testPeds[index]
-                    ped:SetPos(pos)
-                    ped:SetAngles(ang)
+                    alive = ped.SyncBackendDead ~= true and ped:Health() > 0
+                    health = math.max(0, ped:Health())
+                    maxHealth = math.max(1, ped:GetMaxHealth())
+
+                    if alive then
+                        ped:SetPos(pos)
+                        ped:SetAngles(ang)
+                    end
+
                     ped:FrameAdvance(FrameTime())
                     model = ped:GetModel()
                 end
@@ -256,10 +351,11 @@ local function appendTestPeds(players)
         end
 
         table.insert(players, {
-            steamId = "ped:" .. serverId .. ":" .. index,
+            steamId = entityId(serverId, index),
             name = "Sync Ped " .. index,
             state = {
-                health = 100,
+                health = health,
+                maxHealth = maxHealth,
                 armor = 0,
                 team = "sync-test",
                 model = model,
@@ -269,6 +365,8 @@ local function appendTestPeds(players)
                 crouching = false,
                 onGround = true,
                 alive = alive,
+                damageable = true,
+                solid = true,
                 synthetic = false
             }
         })
@@ -276,6 +374,30 @@ local function appendTestPeds(players)
 end
 
 hook.Add("ShutDown", "SyncBackendRemoveTestPeds", removeTestPeds)
+
+hook.Add("EntityTakeDamage", "SyncBackendPedDamage", function(entity, damageInfo)
+    if not IsValid(entity) or not entity.SyncBackendId then return end
+    if damagePed(entity, damageInfo, false) then return true end
+end)
+
+hook.Add("SyncBackendEvent", "SyncBackendApplyPedDamage", function(event)
+    if not event or event.type ~= "entity_damage" then return end
+
+    local payload = event.payload or {}
+    local targetSteamId = payload.targetSteamId or event.steamId
+    if not targetSteamId then return end
+
+    for _, ped in pairs(testPeds) do
+        if IsValid(ped) and ped.SyncBackendId == targetSteamId then
+            local damageInfo = DamageInfo()
+            damageInfo:SetDamage(math.max(0, tonumber(payload.damage) or 0))
+            damageInfo:SetDamageType(tonumber(payload.damageType) or DMG_GENERIC)
+            damageInfo:SetDamagePosition(ped:WorldSpaceCenter())
+            damagePed(ped, damageInfo, true)
+            return
+        end
+    end
+end)
 
 local function vectorFromTable(value)
     value = value or {}
@@ -391,7 +513,7 @@ local function updateRemoteEntity(player)
 
     local steamId = player.steamId
     local state = player.state or {}
-    if not steamId or state.alive == false then return end
+    if not steamId then return end
 
     local model = state.model or "models/player/kleiner.mdl"
     local targetPos = vectorFromTable(state.position)
@@ -407,12 +529,13 @@ local function updateRemoteEntity(player)
         if not IsValid(entity) then return end
 
         entity:SetModel(model)
-        entity:SetSolid(SOLID_NONE)
+        entity:SetSolid(SOLID_BBOX)
         entity:SetMoveType(MOVETYPE_NONE)
-        entity:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
+        entity:SetCollisionGroup(COLLISION_GROUP_NPC)
         entity:SetNWString("SyncBackendRemoteName", player.name or steamId)
         entity:SetNWString("SyncBackendRemoteServer", player.serverId or "remote")
         entity:Spawn()
+        makeDamageablePed(entity, steamId, true)
         entity.AutomaticFrameAdvance = true
 
         remote = {
@@ -434,6 +557,10 @@ local function updateRemoteEntity(player)
     remote.forceCycle = true
     remote.entity:SetNWString("SyncBackendRemoteName", player.name or steamId)
     remote.entity:SetNWString("SyncBackendRemoteServer", player.serverId or "remote")
+    remote.entity:SetHealth(math.max(0, tonumber(state.health) or remote.entity:Health()))
+    remote.entity:SetMaxHealth(math.max(1, tonumber(state.maxHealth) or remote.entity:GetMaxHealth()))
+    remote.entity:SetNoDraw(state.alive == false)
+    remote.entity:SetNotSolid(state.alive == false)
 end
 
 hook.Add("Think", "SyncBackendRemoteEntityThink", function()

@@ -90,10 +90,14 @@ sync_test_peds "1"
 sync_test_ped_count "4"
 sync_test_ped_radius "260"
 sync_test_ped_speed "1.4"
+sync_test_ped_health "100"
 ```
 
 Join `vds-13` and the peds published by `vds-44` should appear as moving full
-models around the first player position on `vds-44`. Disable with:
+models around the first player position on `vds-44`. Synced peds are damageable:
+remote proxy damage is forwarded through the backend, the source ped health is
+updated, and `health`, `maxHealth`, `alive`, `damageable`, and `solid` are sent
+with the movement state. Disable with:
 
 ```cfg
 sync_test_peds "0"
