@@ -11,10 +11,12 @@ CreateConVar("sync_test_peds", "0", FCVAR_ARCHIVE, "Publish moving test peds for
 CreateConVar("sync_test_ped_count", "4", FCVAR_ARCHIVE, "Number of moving test peds to publish")
 CreateConVar("sync_test_ped_radius", "260", FCVAR_ARCHIVE, "Movement radius for test peds")
 CreateConVar("sync_test_ped_speed", "1.4", FCVAR_ARCHIVE, "Movement speed for test peds")
+CreateConVar("sync_test_ped_spawn_entities", "1", FCVAR_ARCHIVE, "Spawn real moving test ped entities on this server")
 
 util.AddNetworkString("SyncBackendGhostStates")
 
 local lastEventId = 0
+local testPeds = {}
 
 timer.Simple(0, function()
     game.ConsoleCommand("exec sync_backend.cfg\n")
@@ -72,8 +74,53 @@ local function playerState(ply)
     return payload
 end
 
+local function removeTestPeds()
+    for _, ped in pairs(testPeds) do
+        if IsValid(ped) then
+            ped:Remove()
+        end
+    end
+    testPeds = {}
+end
+
+local function ensureTestPeds(count)
+    if not GetConVar("sync_test_ped_spawn_entities"):GetBool() then return end
+
+    for index = 1, count do
+        if not IsValid(testPeds[index]) then
+            local ped = ents.Create("prop_dynamic")
+            if IsValid(ped) then
+                ped:SetModel("models/player/kleiner.mdl")
+                ped:SetSolid(SOLID_BBOX)
+                ped:SetMoveType(MOVETYPE_NONE)
+                ped:SetCollisionGroup(COLLISION_GROUP_PLAYER)
+                ped:SetNWString("SyncBackendPedName", "Sync Ped " .. index)
+                ped:Spawn()
+
+                local sequence = ped:LookupSequence("walk_all")
+                if sequence and sequence >= 0 then
+                    ped:ResetSequence(sequence)
+                    ped:SetPlaybackRate(1)
+                end
+
+                testPeds[index] = ped
+            end
+        end
+    end
+
+    for index, ped in pairs(testPeds) do
+        if index > count and IsValid(ped) then
+            ped:Remove()
+            testPeds[index] = nil
+        end
+    end
+end
+
 local function appendTestPeds(players)
-    if not GetConVar("sync_test_peds"):GetBool() then return end
+    if not GetConVar("sync_test_peds"):GetBool() then
+        removeTestPeds()
+        return
+    end
 
     local serverId = GetConVar("sync_server_id"):GetString()
     local count = math.Clamp(GetConVar("sync_test_ped_count"):GetInt(), 1, 32)
@@ -86,12 +133,24 @@ local function appendTestPeds(players)
         base = humans[1]:GetPos()
     end
 
+    ensureTestPeds(count)
+
     for index = 1, count do
         local phase = CurTime() * speed + (index / count) * math.pi * 2
         local pos = base + Vector(math.cos(phase) * radius, math.sin(phase) * radius, 0)
         local nextPos = base + Vector(math.cos(phase + 0.1) * radius, math.sin(phase + 0.1) * radius, 0)
         local vel = (nextPos - pos) * 10
         local yaw = vel:Angle().y
+        local model = "models/player/kleiner.mdl"
+        local alive = true
+
+        if IsValid(testPeds[index]) then
+            local ped = testPeds[index]
+            ped:SetPos(pos)
+            ped:SetAngles(Angle(0, yaw, 0))
+            ped:FrameAdvance(FrameTime())
+            model = ped:GetModel()
+        end
 
         table.insert(players, {
             steamId = "ped:" .. serverId .. ":" .. index,
@@ -100,18 +159,20 @@ local function appendTestPeds(players)
                 health = 100,
                 armor = 0,
                 team = "sync-test",
-                model = "models/player/kleiner.mdl",
+                model = model,
                 position = { x = pos.x, y = pos.y, z = pos.z },
                 angle = { pitch = 0, yaw = yaw, roll = 0 },
                 velocity = { x = vel.x, y = vel.y, z = vel.z },
                 crouching = false,
                 onGround = true,
-                alive = true,
-                synthetic = true
+                alive = alive,
+                synthetic = false
             }
         })
     end
 end
+
+hook.Add("ShutDown", "SyncBackendRemoveTestPeds", removeTestPeds)
 
 hook.Add("PlayerInitialSpawn", "SyncBackendConnect", function(ply)
     timer.Simple(2, function()
