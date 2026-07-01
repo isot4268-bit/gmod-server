@@ -87,7 +87,7 @@ local function appendTestPeds(players)
         local pos = base + Vector(math.cos(phase) * radius, math.sin(phase) * radius, 0)
         local nextPos = base + Vector(math.cos(phase + 0.1) * radius, math.sin(phase + 0.1) * radius, 0)
         local vel = (nextPos - pos) * 10
-        local yaw = math.deg(math.atan2(vel.y, vel.x))
+        local yaw = vel:Angle().y
 
         table.insert(players, {
             steamId = "ped:" .. serverId .. ":" .. index,
