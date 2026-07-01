@@ -1,4 +1,4 @@
-# Garry's Mod Server
+# Garry's Mod Server + Sync Backend
 
 Windows Garry's Mod dedicated server helper files.
 
@@ -7,6 +7,9 @@ Windows Garry's Mod dedicated server helper files.
 - `start-gmod-server.bat` starts the server on port `27015`.
 - `update-gmod-server.bat` installs or updates the server with SteamCMD.
 - `server/garrysmod/cfg/server.cfg` contains the basic server settings.
+- `backend/` contains the Redis/Postgres sync API.
+- `docker-compose.sync.yml` starts the sync backend, Redis, and Postgres.
+- `server/garrysmod/lua/autorun/server/sync_backend.lua` sends GMod server/player state to the backend.
 
 ## Setup
 
@@ -18,3 +21,43 @@ start-gmod-server.bat
 ```
 
 Before exposing the server publicly, change `rcon_password` in `server/garrysmod/cfg/server.cfg`.
+
+## Sync Backend
+
+This backend is for running multiple GMod shards/VDS servers together:
+
+- player presence and last known state
+- Redis cache and pub/sub
+- Postgres persistence
+- cross-server event log
+- HTTP polling for GMod Lua servers
+- WebSocket stream at `/ws` for external dashboards/tools
+
+It does not remove the Source/Garry's Mod per-server player cap. Two VDS machines can be coordinated as two shards, but one single 256-player physics world is not created by this backend alone.
+
+### Start Backend
+
+Install Docker, set a real key, then run:
+
+```bat
+set SYNC_API_KEY=change-this-long-random-key
+start-sync-backend.bat
+```
+
+Health check:
+
+```bat
+curl http://127.0.0.1:8080/health
+```
+
+### Configure Each GMod Server
+
+Copy this repo to each VDS, then set unique server IDs in the server console or config:
+
+```cfg
+sync_backend_url "http://BACKEND_VDS_IP:8080"
+sync_backend_key "change-this-long-random-key"
+sync_server_id "vds-13"
+```
+
+Use `sync_server_id "vds-44"` on the other VDS.
