@@ -70,7 +70,26 @@ sync_state_rate "0.10"
 sync_ghost_rate "0.10"
 ```
 
-Remote players are rendered as translucent clientside models. This is a shard
-visibility layer, not true Source-engine entity replication: bullets, physics,
-collisions, prediction, voice, and vehicle control still belong to the server
-the real player is connected to.
+Remote players are rendered as full clientside models. This is a shard visibility
+layer, not true Source-engine entity replication: bullets, physics, collisions,
+prediction, voice, and vehicle control still belong to the server the real
+player is connected to.
+
+### Test Moving Peds
+
+To watch sync from `vds-44` on `vds-13`, enable generated moving peds only on
+`vds-44`:
+
+```cfg
+sync_test_peds "1"
+sync_test_ped_count "4"
+sync_test_ped_radius "260"
+sync_test_ped_speed "1.4"
+```
+
+Join `vds-13` and the peds published by `vds-44` should appear as moving full
+models around the first player position on `vds-44`. Disable with:
+
+```cfg
+sync_test_peds "0"
+```

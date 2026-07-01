@@ -28,8 +28,8 @@ local function ensureGhost(player)
         if not IsValid(entity) then return nil end
 
         entity:SetNoDraw(true)
-        entity:SetRenderMode(RENDERMODE_TRANSALPHA)
-        entity:SetColor(Color(120, 190, 255, 170))
+        entity:SetRenderMode(RENDERMODE_NORMAL)
+        entity:SetColor(Color(255, 255, 255, 255))
 
         ghost = {
             entity = entity,
@@ -88,7 +88,7 @@ hook.Add("Think", "SyncBackendGhostThink", function()
     end
 end)
 
-hook.Add("PostDrawTranslucentRenderables", "SyncBackendGhostDraw", function()
+hook.Add("PostDrawOpaqueRenderables", "SyncBackendGhostDraw", function()
     for _, ghost in pairs(ghosts) do
         if IsValid(ghost.entity) then
             ghost.entity:DrawModel()

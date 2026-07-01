@@ -7,6 +7,10 @@ CreateConVar("sync_backend_key", "change-this-long-random-key", FCVAR_ARCHIVE, "
 CreateConVar("sync_server_id", "vds-13", FCVAR_ARCHIVE, "Unique shard/server id")
 CreateConVar("sync_state_rate", "0.10", FCVAR_ARCHIVE, "Seconds between movement sync updates")
 CreateConVar("sync_ghost_rate", "0.10", FCVAR_ARCHIVE, "Seconds between remote ghost polls")
+CreateConVar("sync_test_peds", "0", FCVAR_ARCHIVE, "Publish moving test peds for cross-server sync testing")
+CreateConVar("sync_test_ped_count", "4", FCVAR_ARCHIVE, "Number of moving test peds to publish")
+CreateConVar("sync_test_ped_radius", "260", FCVAR_ARCHIVE, "Movement radius for test peds")
+CreateConVar("sync_test_ped_speed", "1.4", FCVAR_ARCHIVE, "Movement speed for test peds")
 
 util.AddNetworkString("SyncBackendGhostStates")
 
@@ -64,6 +68,47 @@ local function playerState(ply)
     return payload
 end
 
+local function appendTestPeds(players)
+    if not GetConVar("sync_test_peds"):GetBool() then return end
+
+    local serverId = GetConVar("sync_server_id"):GetString()
+    local count = math.Clamp(GetConVar("sync_test_ped_count"):GetInt(), 1, 32)
+    local radius = math.Clamp(GetConVar("sync_test_ped_radius"):GetFloat(), 64, 2048)
+    local speed = math.Clamp(GetConVar("sync_test_ped_speed"):GetFloat(), 0.1, 8)
+    local base = Vector(0, 0, 64)
+    local humans = player.GetHumans()
+
+    if humans[1] and IsValid(humans[1]) then
+        base = humans[1]:GetPos()
+    end
+
+    for index = 1, count do
+        local phase = CurTime() * speed + (index / count) * math.pi * 2
+        local pos = base + Vector(math.cos(phase) * radius, math.sin(phase) * radius, 0)
+        local nextPos = base + Vector(math.cos(phase + 0.1) * radius, math.sin(phase + 0.1) * radius, 0)
+        local vel = (nextPos - pos) * 10
+        local yaw = math.deg(math.atan2(vel.y, vel.x))
+
+        table.insert(players, {
+            steamId = "ped:" .. serverId .. ":" .. index,
+            name = "Sync Ped " .. index,
+            state = {
+                health = 100,
+                armor = 0,
+                team = "sync-test",
+                model = "models/player/kleiner.mdl",
+                position = { x = pos.x, y = pos.y, z = pos.z },
+                angle = { pitch = 0, yaw = yaw, roll = 0 },
+                velocity = { x = vel.x, y = vel.y, z = vel.z },
+                crouching = false,
+                onGround = true,
+                alive = true,
+                synthetic = true
+            }
+        })
+    end
+end
+
 hook.Add("PlayerInitialSpawn", "SyncBackendConnect", function(ply)
     timer.Simple(2, function()
         if IsValid(ply) then
@@ -109,6 +154,8 @@ timer.Create("SyncBackendPlayerState", 0.10, 0, function()
             state = payload.state
         })
     end
+
+    appendTestPeds(players)
 
     postJson("/players/states", {
         serverId = GetConVar("sync_server_id"):GetString(),
