@@ -21,6 +21,8 @@ local testPeds = {}
 local testPedBrain = {}
 local remoteEntities = {}
 local remoteEntityStaleAfter = 2.5
+local ghostPollSerial = 0
+local lastGhostPollApplied = 0
 
 local function applyConfigLine(line)
     local key, quoted = string.match(line, '^%s*([%w_]+)%s+"([^"]*)"%s*$')
@@ -101,6 +103,9 @@ local function playerState(ply)
         angle = { pitch = ang.p, yaw = ang.y, roll = ang.r },
         bodyAngle = { pitch = bodyAng.p, yaw = bodyAng.y, roll = bodyAng.r },
         velocity = { x = vel.x, y = vel.y, z = vel.z },
+        sequence = ply:GetSequence(),
+        cycle = ply:GetCycle(),
+        playbackRate = ply:GetPlaybackRate(),
         crouching = ply:Crouching(),
         onGround = ply:OnGround(),
         alive = ply:Alive()
@@ -131,6 +136,7 @@ local function ensureTestPeds(count)
                 ped:SetCollisionGroup(COLLISION_GROUP_PLAYER)
                 ped:SetNWString("SyncBackendPedName", "Sync Ped " .. index)
                 ped:Spawn()
+                ped.AutomaticFrameAdvance = true
 
                 local sequence = ped:LookupSequence("walk_all")
                 if sequence and sequence >= 0 then
@@ -243,6 +249,7 @@ local function appendTestPeds(players)
                     local ped = testPeds[index]
                     ped:SetPos(pos)
                     ped:SetAngles(ang)
+                    ped:FrameAdvance(FrameTime())
                     model = ped:GetModel()
                 end
             end)
@@ -280,11 +287,65 @@ local function angleFromTable(value)
     return Angle(tonumber(value.pitch) or 0, tonumber(value.yaw) or 0, tonumber(value.roll) or 0)
 end
 
-local function applyModelPose(entity, state)
+local function selectProxySequence(entity, moving, crouching)
+    local acts = {}
+    local function addAct(act)
+        if act then table.insert(acts, act) end
+    end
+
+    if moving then
+        if crouching then
+            addAct(ACT_HL2MP_WALK_CROUCH)
+            addAct(ACT_WALK_CROUCH)
+        end
+        addAct(ACT_HL2MP_WALK)
+        addAct(ACT_WALK)
+        addAct(ACT_HL2MP_RUN)
+        addAct(ACT_RUN)
+    else
+        if crouching then
+            addAct(ACT_HL2MP_IDLE_CROUCH)
+            addAct(ACT_COVER_LOW)
+        end
+        addAct(ACT_HL2MP_IDLE)
+        addAct(ACT_IDLE)
+    end
+
+    for _, act in ipairs(acts) do
+        if act then
+            local sequence = entity:SelectWeightedSequence(act)
+            if sequence and sequence >= 0 then return sequence end
+        end
+    end
+
+    local names = moving and {
+        "walk_all",
+        "walk_smg1_all",
+        "walk_pistol_all",
+        "walk_passive",
+        "run_all"
+    } or {
+        "idle_all_01",
+        "idle_smg1",
+        "idle_pistol",
+        "idle_passive",
+        "idle"
+    }
+
+    for _, name in ipairs(names) do
+        local sequence = entity:LookupSequence(name)
+        if sequence and sequence >= 0 then return sequence end
+    end
+
+    return 0
+end
+
+local function applyModelPose(entity, state, forceCycle)
     local eyeAng = angleFromTable(state.angle)
     local bodyAng = angleFromTable(state.bodyAngle or state.angle)
     local velocity = vectorFromTable(state.velocity)
     local moveSpeed = velocity:Length2D()
+    local moving = moveSpeed > 8
 
     entity:SetAngles(Angle(0, eyeAng.y, 0))
     entity:SetPoseParameter("head_pitch", math.Clamp(eyeAng.p, -89, 89))
@@ -293,12 +354,24 @@ local function applyModelPose(entity, state)
     entity:SetPoseParameter("aim_yaw", math.Clamp(math.AngleDifference(eyeAng.y, bodyAng.y), -90, 90))
     entity:SetPoseParameter("move_yaw", 0)
 
-    local sequenceName = moveSpeed > 10 and "walk_all" or "idle_all_01"
-    local sequence = entity:LookupSequence(sequenceName)
+    local sequence = tonumber(state.sequence)
+    if not sequence or sequence < 0 then
+        sequence = selectProxySequence(entity, moving, state.crouching == true)
+    end
+
     if sequence and sequence >= 0 and entity:GetSequence() ~= sequence then
         entity:ResetSequence(sequence)
     end
-    entity:SetPlaybackRate(moveSpeed > 10 and math.Clamp(moveSpeed / 120, 0.5, 2) or 1)
+
+    if forceCycle and state.cycle then
+        entity:SetCycle(math.Clamp(tonumber(state.cycle) or 0, 0, 1))
+    end
+
+    local playbackRate = tonumber(state.playbackRate)
+    if not playbackRate or playbackRate <= 0 then
+        playbackRate = moving and math.Clamp(moveSpeed / 120, 0.65, 2.2) or 1
+    end
+    entity:SetPlaybackRate(playbackRate)
 end
 
 local function removeRemoteEntities()
@@ -321,6 +394,8 @@ local function updateRemoteEntity(player)
     if not steamId or state.alive == false then return end
 
     local model = state.model or "models/player/kleiner.mdl"
+    local targetPos = vectorFromTable(state.position)
+    local targetAng = angleFromTable(state.angle)
     local remote = remoteEntities[steamId]
 
     if not remote or not IsValid(remote.entity) or remote.model ~= model then
@@ -338,31 +413,52 @@ local function updateRemoteEntity(player)
         entity:SetNWString("SyncBackendRemoteName", player.name or steamId)
         entity:SetNWString("SyncBackendRemoteServer", player.serverId or "remote")
         entity:Spawn()
+        entity.AutomaticFrameAdvance = true
 
         remote = {
             entity = entity,
             model = model,
+            pos = targetPos,
+            targetPos = targetPos,
+            targetAng = targetAng,
+            state = state,
             lastSeen = CurTime()
         }
         remoteEntities[steamId] = remote
     end
 
     remote.lastSeen = CurTime()
+    remote.targetPos = targetPos
+    remote.targetAng = targetAng
+    remote.state = state
+    remote.forceCycle = true
     remote.entity:SetNWString("SyncBackendRemoteName", player.name or steamId)
     remote.entity:SetNWString("SyncBackendRemoteServer", player.serverId or "remote")
-    remote.entity:SetPos(vectorFromTable(state.position))
-    applyModelPose(remote.entity, state)
-    remote.entity:FrameAdvance(FrameTime())
 end
 
-timer.Create("SyncBackendRemoteEntityCleanup", 0.5, 0, function()
+hook.Add("Think", "SyncBackendRemoteEntityThink", function()
     local now = CurTime()
+    local frame = FrameTime()
+    local lerpAmount = math.Clamp(frame * 14, 0, 1)
+
     for steamId, remote in pairs(remoteEntities) do
         if not IsValid(remote.entity) or now - remote.lastSeen > remoteEntityStaleAfter then
             if IsValid(remote.entity) then
                 remote.entity:Remove()
             end
             remoteEntities[steamId] = nil
+        else
+            local distance = remote.pos:Distance(remote.targetPos)
+            if distance > 512 then
+                remote.pos = remote.targetPos
+            else
+                remote.pos = LerpVector(lerpAmount, remote.pos, remote.targetPos)
+            end
+
+            remote.entity:SetPos(remote.pos)
+            applyModelPose(remote.entity, remote.state or {}, remote.forceCycle == true)
+            remote.forceCycle = false
+            remote.entity:FrameAdvance(frame)
         end
     end
 end)
@@ -427,12 +523,17 @@ timer.Create("SyncBackendGhostPoll", 0.10, 0, function()
     local interval = math.Clamp(GetConVar("sync_ghost_rate"):GetFloat(), 0.05, 1)
     timer.Adjust("SyncBackendGhostPoll", interval, 0)
 
+    ghostPollSerial = ghostPollSerial + 1
+    local requestSerial = ghostPollSerial
     local url = backendUrl("/players/states?seconds=2&serverId=" .. GetConVar("sync_server_id"):GetString())
     HTTP({
         method = "GET",
         url = url,
         headers = headers(),
         success = function(_, body)
+            if requestSerial < lastGhostPollApplied then return end
+            lastGhostPollApplied = requestSerial
+
             local decoded = util.JSONToTable(body or "")
             if not decoded or not decoded.players then return end
 
