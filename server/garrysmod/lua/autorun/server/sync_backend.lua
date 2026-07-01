@@ -12,12 +12,15 @@ CreateConVar("sync_test_ped_count", "4", FCVAR_ARCHIVE, "Number of moving test p
 CreateConVar("sync_test_ped_radius", "260", FCVAR_ARCHIVE, "Movement radius for test peds")
 CreateConVar("sync_test_ped_speed", "1.4", FCVAR_ARCHIVE, "Movement speed for test peds")
 CreateConVar("sync_test_ped_spawn_entities", "1", FCVAR_ARCHIVE, "Spawn real moving test ped entities on this server")
+CreateConVar("sync_spawn_remote_entities", "1", FCVAR_ARCHIVE, "Spawn server-side entities for remote synced players")
 
 util.AddNetworkString("SyncBackendGhostStates")
 
 local lastEventId = 0
 local testPeds = {}
 local testPedBrain = {}
+local remoteEntities = {}
+local remoteEntityStaleAfter = 2.5
 
 local function applyConfigLine(line)
     local key, quoted = string.match(line, '^%s*([%w_]+)%s+"([^"]*)"%s*$')
@@ -85,6 +88,7 @@ end
 local function playerState(ply)
     local pos = ply:GetPos()
     local ang = ply:EyeAngles()
+    local bodyAng = ply:GetAngles()
     local vel = ply:GetVelocity()
     local payload = playerPayload(ply)
     payload.state = {
@@ -92,8 +96,10 @@ local function playerState(ply)
         armor = ply:Armor(),
         team = team.GetName(ply:Team()),
         model = ply:GetModel(),
+        color = { x = ply:GetPlayerColor().x, y = ply:GetPlayerColor().y, z = ply:GetPlayerColor().z },
         position = { x = pos.x, y = pos.y, z = pos.z },
         angle = { pitch = ang.p, yaw = ang.y, roll = ang.r },
+        bodyAngle = { pitch = bodyAng.p, yaw = bodyAng.y, roll = bodyAng.r },
         velocity = { x = vel.x, y = vel.y, z = vel.z },
         crouching = ply:Crouching(),
         onGround = ply:OnGround(),
@@ -264,6 +270,105 @@ end
 
 hook.Add("ShutDown", "SyncBackendRemoveTestPeds", removeTestPeds)
 
+local function vectorFromTable(value)
+    value = value or {}
+    return Vector(tonumber(value.x) or 0, tonumber(value.y) or 0, tonumber(value.z) or 0)
+end
+
+local function angleFromTable(value)
+    value = value or {}
+    return Angle(tonumber(value.pitch) or 0, tonumber(value.yaw) or 0, tonumber(value.roll) or 0)
+end
+
+local function applyModelPose(entity, state)
+    local eyeAng = angleFromTable(state.angle)
+    local bodyAng = angleFromTable(state.bodyAngle or state.angle)
+    local velocity = vectorFromTable(state.velocity)
+    local moveSpeed = velocity:Length2D()
+
+    entity:SetAngles(Angle(0, eyeAng.y, 0))
+    entity:SetPoseParameter("head_pitch", math.Clamp(eyeAng.p, -89, 89))
+    entity:SetPoseParameter("head_yaw", math.Clamp(math.AngleDifference(eyeAng.y, bodyAng.y), -90, 90))
+    entity:SetPoseParameter("aim_pitch", math.Clamp(eyeAng.p, -89, 89))
+    entity:SetPoseParameter("aim_yaw", math.Clamp(math.AngleDifference(eyeAng.y, bodyAng.y), -90, 90))
+    entity:SetPoseParameter("move_yaw", 0)
+
+    local sequenceName = moveSpeed > 10 and "walk_all" or "idle_all_01"
+    local sequence = entity:LookupSequence(sequenceName)
+    if sequence and sequence >= 0 and entity:GetSequence() ~= sequence then
+        entity:ResetSequence(sequence)
+    end
+    entity:SetPlaybackRate(moveSpeed > 10 and math.Clamp(moveSpeed / 120, 0.5, 2) or 1)
+end
+
+local function removeRemoteEntities()
+    for _, remote in pairs(remoteEntities) do
+        if IsValid(remote.entity) then
+            remote.entity:Remove()
+        end
+    end
+    remoteEntities = {}
+end
+
+local function updateRemoteEntity(player)
+    if not GetConVar("sync_spawn_remote_entities"):GetBool() then
+        removeRemoteEntities()
+        return
+    end
+
+    local steamId = player.steamId
+    local state = player.state or {}
+    if not steamId or state.alive == false then return end
+
+    local model = state.model or "models/player/kleiner.mdl"
+    local remote = remoteEntities[steamId]
+
+    if not remote or not IsValid(remote.entity) or remote.model ~= model then
+        if remote and IsValid(remote.entity) then
+            remote.entity:Remove()
+        end
+
+        local entity = ents.Create("prop_dynamic")
+        if not IsValid(entity) then return end
+
+        entity:SetModel(model)
+        entity:SetSolid(SOLID_NONE)
+        entity:SetMoveType(MOVETYPE_NONE)
+        entity:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
+        entity:SetNWString("SyncBackendRemoteName", player.name or steamId)
+        entity:SetNWString("SyncBackendRemoteServer", player.serverId or "remote")
+        entity:Spawn()
+
+        remote = {
+            entity = entity,
+            model = model,
+            lastSeen = CurTime()
+        }
+        remoteEntities[steamId] = remote
+    end
+
+    remote.lastSeen = CurTime()
+    remote.entity:SetNWString("SyncBackendRemoteName", player.name or steamId)
+    remote.entity:SetNWString("SyncBackendRemoteServer", player.serverId or "remote")
+    remote.entity:SetPos(vectorFromTable(state.position))
+    applyModelPose(remote.entity, state)
+    remote.entity:FrameAdvance(FrameTime())
+end
+
+timer.Create("SyncBackendRemoteEntityCleanup", 0.5, 0, function()
+    local now = CurTime()
+    for steamId, remote in pairs(remoteEntities) do
+        if not IsValid(remote.entity) or now - remote.lastSeen > remoteEntityStaleAfter then
+            if IsValid(remote.entity) then
+                remote.entity:Remove()
+            end
+            remoteEntities[steamId] = nil
+        end
+    end
+end)
+
+hook.Add("ShutDown", "SyncBackendRemoveRemoteEntities", removeRemoteEntities)
+
 hook.Add("PlayerInitialSpawn", "SyncBackendConnect", function(ply)
     timer.Simple(2, function()
         if IsValid(ply) then
@@ -330,6 +435,12 @@ timer.Create("SyncBackendGhostPoll", 0.10, 0, function()
         success = function(_, body)
             local decoded = util.JSONToTable(body or "")
             if not decoded or not decoded.players then return end
+
+            for _, player in ipairs(decoded.players) do
+                updateRemoteEntity(player)
+            end
+
+            if GetConVar("sync_spawn_remote_entities"):GetBool() then return end
 
             local encoded = util.TableToJSON(decoded.players)
             if not encoded or #encoded > 60000 then return end

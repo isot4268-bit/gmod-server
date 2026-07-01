@@ -83,6 +83,9 @@ hook.Add("Think", "SyncBackendGhostThink", function()
 
             ghost.entity:SetPos(ghost.pos)
             ghost.entity:SetAngles(Angle(0, ghost.ang.y, 0))
+            ghost.entity:SetPoseParameter("head_pitch", math.Clamp(ghost.ang.p, -89, 89))
+            ghost.entity:SetPoseParameter("aim_pitch", math.Clamp(ghost.ang.p, -89, 89))
+            ghost.entity:FrameAdvance(FrameTime())
         end
     end
 end)

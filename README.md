@@ -38,24 +38,19 @@ It does not remove the Source/Garry's Mod per-server player cap. Two VDS machine
 
 ### Start Backend
 
-Install Docker, set a real key, then run:
+Use the same launcher on each VDS:
 
 ```bat
-set SYNC_API_KEY=change-this-long-random-key
-start-sync-backend.bat
+start-gmod-server.bat
 ```
 
-Health check:
+On `vds-13` it starts the sync backend first. On `vds-44` it starts the SSH
+tunnel to `vds-13` first. Then it starts SRCDS.
+
+Health check on the backend VDS:
 
 ```bat
 curl http://127.0.0.1:8080/health
-```
-
-Without Docker/Redis/Postgres, use temporary memory mode for live testing:
-
-```bat
-set SYNC_API_KEY=change-this-long-random-key
-start-sync-backend-memory.bat
 ```
 
 Memory mode is not persistent; it is for testing sync before Redis/Postgres are installed.
@@ -79,10 +74,11 @@ sync_state_rate "0.10"
 sync_ghost_rate "0.10"
 ```
 
-Remote players are rendered as full clientside models. This is a shard visibility
-layer, not true Source-engine entity replication: bullets, physics, collisions,
-prediction, voice, and vehicle control still belong to the server the real
-player is connected to.
+Remote players are spawned as full opaque server-side proxy models. Their
+position, movement, model, and eye direction are copied from the real player.
+This is a shard visibility layer, not true Source-engine entity replication:
+bullets, physics, collisions, prediction, voice, and vehicle control still
+belong to the server the real player is connected to.
 
 ### Test Moving Peds
 
