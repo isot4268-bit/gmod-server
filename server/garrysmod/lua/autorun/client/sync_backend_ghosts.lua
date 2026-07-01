@@ -29,7 +29,6 @@ local function ensureGhost(player)
 
         entity:SetNoDraw(true)
         entity:SetRenderMode(RENDERMODE_NORMAL)
-        entity:SetColor(Color(255, 255, 255, 255))
 
         ghost = {
             entity = entity,
