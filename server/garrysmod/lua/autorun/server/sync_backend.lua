@@ -17,6 +17,7 @@ util.AddNetworkString("SyncBackendGhostStates")
 
 local lastEventId = 0
 local testPeds = {}
+local testPedBrain = {}
 
 local function applyConfigLine(line)
     local key, quoted = string.match(line, '^%s*([%w_]+)%s+"([^"]*)"%s*$')
@@ -108,6 +109,7 @@ local function removeTestPeds()
         end
     end
     testPeds = {}
+    testPedBrain = {}
 end
 
 local function ensureTestPeds(count)
@@ -143,6 +145,67 @@ local function ensureTestPeds(count)
     end
 end
 
+local function groundPosition(pos)
+    local trace = util.TraceLine({
+        start = pos + Vector(0, 0, 256),
+        endpos = pos - Vector(0, 0, 4096),
+        mask = MASK_SOLID_BRUSHONLY
+    })
+
+    if trace.Hit then
+        return trace.HitPos + Vector(0, 0, 2)
+    end
+
+    return pos
+end
+
+local function randomWalkTarget(origin, radius)
+    local angle = math.Rand(0, math.pi * 2)
+    local distance = math.Rand(radius * 0.25, radius)
+    return groundPosition(origin + Vector(math.cos(angle) * distance, math.sin(angle) * distance, 0))
+end
+
+local function pedWalkState(index, origin, radius, speed)
+    local now = CurTime()
+    local brain = testPedBrain[index]
+
+    if not brain then
+        brain = {
+            pos = randomWalkTarget(origin, radius * 0.5),
+            target = randomWalkTarget(origin, radius),
+            yaw = 0,
+            waitUntil = 0
+        }
+        testPedBrain[index] = brain
+    end
+
+    if now < brain.waitUntil then
+        return brain.pos, Angle(0, brain.yaw, 0), Vector(0, 0, 0)
+    end
+
+    local delta = brain.target - brain.pos
+    delta.z = 0
+    local distance = delta:Length()
+
+    if distance < 24 then
+        brain.target = randomWalkTarget(origin, radius)
+        brain.waitUntil = now + math.Rand(0.2, 1.2)
+        return brain.pos, Angle(0, brain.yaw, 0), Vector(0, 0, 0)
+    end
+
+    local walkSpeed = math.Clamp(95 * speed, 40, 220)
+    local frame = math.max(FrameTime(), 0.05)
+    local direction = delta:GetNormalized()
+    local step = math.min(walkSpeed * frame, distance)
+    local nextPos = groundPosition(brain.pos + direction * step)
+    local velocity = (nextPos - brain.pos) / frame
+
+    brain.pos = nextPos
+    brain.yaw = direction:Angle().y
+
+    return brain.pos, Angle(0, brain.yaw, 0), velocity
+end
+
 local function appendTestPeds(players)
     if not GetConVar("sync_test_peds"):GetBool() then
         removeTestPeds()
@@ -161,11 +224,8 @@ local function appendTestPeds(players)
     end
 
     for index = 1, count do
-        local phase = CurTime() * speed + (index / count) * math.pi * 2
-        local pos = base + Vector(math.cos(phase) * radius, math.sin(phase) * radius, 0)
-        local nextPos = base + Vector(math.cos(phase + 0.1) * radius, math.sin(phase + 0.1) * radius, 0)
-        local vel = (nextPos - pos) * 10
-        local yaw = vel:Angle().y
+        local pos, ang, vel = pedWalkState(index, base, radius, speed)
+        local yaw = ang.y
         local model = "models/player/kleiner.mdl"
         local alive = true
 
@@ -176,7 +236,7 @@ local function appendTestPeds(players)
                 if IsValid(testPeds[index]) then
                     local ped = testPeds[index]
                     ped:SetPos(pos)
-                    ped:SetAngles(Angle(0, yaw, 0))
+                    ped:SetAngles(ang)
                     model = ped:GetModel()
                 end
             end)
