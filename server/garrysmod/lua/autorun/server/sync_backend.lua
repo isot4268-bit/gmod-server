@@ -18,8 +18,26 @@ util.AddNetworkString("SyncBackendGhostStates")
 local lastEventId = 0
 local testPeds = {}
 
+local function applyConfigLine(line)
+    local key, quoted = string.match(line, '^%s*([%w_]+)%s+"([^"]*)"%s*$')
+    if not key then
+        key, quoted = string.match(line, "^%s*([%w_]+)%s+([^%s]+)%s*$")
+    end
+
+    if key and quoted and string.StartWith(key, "sync_") and GetConVar(key) then
+        RunConsoleCommand(key, quoted)
+    end
+end
+
 local function loadSyncConfig()
-    RunConsoleCommand("exec", "sync_backend.cfg")
+    local cfg = file.Read("cfg/sync_backend.cfg", "GAME")
+    if cfg then
+        for _, line in ipairs(string.Explode("\n", cfg)) do
+            applyConfigLine(line)
+        end
+    else
+        print("[sync-backend] cfg/sync_backend.cfg not found")
+    end
 
     timer.Simple(0.5, function()
         print("[sync-backend] config loaded: serverId=" .. GetConVar("sync_server_id"):GetString()
