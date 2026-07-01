@@ -16,6 +16,10 @@ util.AddNetworkString("SyncBackendGhostStates")
 
 local lastEventId = 0
 
+timer.Simple(0, function()
+    game.ConsoleCommand("exec sync_backend.cfg\n")
+end)
+
 local function backendUrl(path)
     return GetConVar("sync_backend_url"):GetString() .. path
 end
