@@ -160,8 +160,6 @@ local function appendTestPeds(players)
         base = humans[1]:GetPos()
     end
 
-    ensureTestPeds(count)
-
     for index = 1, count do
         local phase = CurTime() * speed + (index / count) * math.pi * 2
         local pos = base + Vector(math.cos(phase) * radius, math.sin(phase) * radius, 0)
@@ -171,12 +169,17 @@ local function appendTestPeds(players)
         local model = "models/player/kleiner.mdl"
         local alive = true
 
-        if IsValid(testPeds[index]) then
-            local ped = testPeds[index]
-            ped:SetPos(pos)
-            ped:SetAngles(Angle(0, yaw, 0))
-            ped:FrameAdvance(FrameTime())
-            model = ped:GetModel()
+        if GetConVar("sync_test_ped_spawn_entities"):GetBool() then
+            pcall(function()
+                ensureTestPeds(count)
+
+                if IsValid(testPeds[index]) then
+                    local ped = testPeds[index]
+                    ped:SetPos(pos)
+                    ped:SetAngles(Angle(0, yaw, 0))
+                    model = ped:GetModel()
+                end
+            end)
         end
 
         table.insert(players, {
